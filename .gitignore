@@ -1,0 +1,30 @@
+# Environment variables — NEVER commit these
+.env
+.env.local
+.env.production
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Repos cloned by the agent
+services/agent/tmp/
+
+# Build artifacts
+frontend/dist/
+frontend/.vite/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.log
