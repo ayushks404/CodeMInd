@@ -1,0 +1,24 @@
+# Web framework
+fastapi
+uvicorn[standard]
+
+# Config
+python-dotenv
+
+# Git operations
+gitpython
+
+# Embeddings — loaded directly, no separate container needed
+sentence-transformers
+
+# Numerical
+numpy
+
+# Vector store — Qdrant replaces FAISS
+qdrant-client
+
+# Data processing
+scikit-learn
+
+# Pydantic validation
+pydantic

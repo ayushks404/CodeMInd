@@ -1,0 +1,155 @@
+# =============================================================================
+# CodeMind — Docker Compose (Phase 1 — Fixed)
+#
+# HOW TO RUN:
+#   1. Copy ../.env.example to ../.env and fill in GROQ_API_KEY and JWT_SECRET
+#   2. From this directory: docker compose up --build
+#
+# Services:
+#   frontend  :5173  — React/Vite UI
+#   auth      :5000  — Node.js monolith (auth + project + query in Phase 1)
+#   agent     :8000  — FastAPI AI service
+#   qdrant    :6333  — Vector DB (persistent)
+#   mongo     :27017 — MongoDB (migrated to Postgres in Phase 2)
+#   redis     :6379  — Added in Phase 1 fix (required for Phase 2 async queue)
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Frontend — React/Vite
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:5000/api
+    depends_on:
+      - auth
+    networks:
+      - codemind
+
+  # ---------------------------------------------------------------------------
+  # Auth Service — Node.js monolith :5000
+  # Phase 1: serves /api/auth, /api/project, /api/query on one server
+  # Phase 6: split into 3 independent services on :5001, :5002, :5003
+  # ---------------------------------------------------------------------------
+  auth:
+    build:
+      context: ../services/auth
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    environment:
+      - PORT=5000
+      - MONGO_URI=mongodb://mongo:27017/codemind
+      - JWT_SECRET=${JWT_SECRET}
+      - FRONTEND_URL=http://localhost:5173
+      - AI_SERVICE_URL=http://agent:8000
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - mongo
+      - agent
+      - redis
+    networks:
+      - codemind
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # AI Agent Service — FastAPI :8000
+  # ---------------------------------------------------------------------------
+  agent:
+    build:
+      context: ../services/agent
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - QDRANT_URL=http://qdrant:6333
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    volumes:
+      - agent_tmp:/app/tmp
+    networks:
+      - codemind
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Qdrant — Vector Database
+  # Dashboard: http://localhost:6333/dashboard
+  # ---------------------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:v1.9.2
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - codemind
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:6333/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # MongoDB — Phase 1 database
+  # Migrated to PostgreSQL in Phase 2
+  # ---------------------------------------------------------------------------
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - codemind
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Redis — Added in Phase 1 fix
+  # Phase 1: available but not used yet
+  # Phase 2: Celery queue, pub/sub bridge, session management, caching
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - codemind
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  qdrant_data:
+  mongo_data:
+  agent_tmp:
+  redis_data:
+
+# =============================================================================
+# Network
+# =============================================================================
+networks:
+  codemind:
+    driver: bridge
