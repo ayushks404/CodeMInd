@@ -5,17 +5,20 @@ uvicorn[standard]
 # Config
 python-dotenv
 
+#Http requests
+requests
+
 # Git operations
 gitpython
 
-# Embeddings — loaded directly, no separate container needed
-sentence-transformers
+#adding fastembed
+fastembed
 
 # Numerical
 numpy
 
 # Vector store — Qdrant replaces FAISS
-qdrant-client
+qdrant-client==1.9.2
 
 # Data processing
 scikit-learn
