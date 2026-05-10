@@ -7,12 +7,12 @@ RUN apt-get update && apt-get install -y git curl && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 
-# Install deps — sentence-transformers will download the model at runtime (first run)
+# Install deps
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-download the embedding model during build so first request isn't slow
-# Model is cached at /root/.cache/torch/sentence_transformers/
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+# Pre-download the fastembed model during build so first request isn't slow
+# Model is cached inside the container image — no download at runtime
+RUN python -c "from fastembed import TextEmbedding; list(TextEmbedding('BAAI/bge-small-en-v1.5').embed(['warmup']))"
 
 COPY . .
 
