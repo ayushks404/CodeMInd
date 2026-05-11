@@ -1,10 +1,11 @@
 """
 query_worker.py — Celery worker for answering codebase questions
+LangGraph ReAct graph — agent khud decide karta hai
 
 Flow:
 1. Node.js pushQueryJob() → Redis "query_jobs" queue mein likhta hai
 2. Yeh worker queue se task uthata hai
-3. RAG pipeline + critic loop chalata hai
+3. LangGraph graph run karo — agent tools use karta hai
 4. Redis pub/sub mein result publish karta hai
 5. WebSocket service browser ko push karta hai
 """
@@ -13,25 +14,12 @@ query_worker.py — Celery worker for answering codebase questions
 """
 
 import logging
-import numpy as np
 from celery_app import celery_app
-from rag.rag_engine import answer_question
-from graph.critic import critic_agent
+from graph.react_graph import get_react_graph
 from notifications.redis_publisher import publish_query_complete, publish_job_failed
 
-logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-
-def compute_confidence(query_vector, retrieved_vectors):
-    if not retrieved_vectors:
-        return 0.0
-    q = query_vector[0]
-    q_norm = q / (np.linalg.norm(q) + 1e-10)
-    sims = []
-    for v in retrieved_vectors:
-        v_norm = v / (np.linalg.norm(v) + 1e-10)
-        sims.append(float(np.dot(q_norm, v_norm)))
-    return float(np.mean(sims))
 
 
 @celery_app.task(
@@ -41,73 +29,66 @@ def compute_confidence(query_vector, retrieved_vectors):
     default_retry_delay=5,
 )
 def run_query(self, job_id: str, project_id: str, user_id: str, question: str):
-    logging.info(f"[query_worker] Job {job_id} start — user={user_id}")
+    """
+    Celery task — LangGraph ReAct agent chalao.
 
-    MAX_ITERATIONS = 3
-
-    state = {
-        "project_id":     project_id,
-        "query":          question,
-        "original_query": question,
-        "iterations":     0,
-        "answer":         None,
-        "confidence":     0.0,
-    }
-
-    trace  = []
-    result = {}
+    Phase 2 se yahi function tha, lekin andar while loop tha.
+    Ab andar graph.invoke() hai — poora agent yahan chal raha hai.
+    """
+    logger.info(f"[query_worker] Job {job_id} start | project={project_id} | user={user_id}")
 
     try:
-        while state["iterations"] < MAX_ITERATIONS:
-            result = answer_question(state["project_id"], state["query"])
-            state["answer"] = result["answer"]
+        # Initial state banao
+        initial_state = {
+            "project_id":       project_id,
+            "user_id":          user_id,
+            "job_id":           job_id,
+            "question":         question,
+            "original_question": question,
+            "query":            question,
+            "tool_results":     [],
+            "iterations":       0,
+            "tool_calls_done":  0,
+            "answer":           "",
+            "confidence":       0.0,
+            "sources":          [],
+            "trace":            [],
+            "should_continue":  False,
+            "query_type":       "simple",
+        }
 
-            confidence = compute_confidence(
-                query_vector=result["query_vector"],
-                retrieved_vectors=result["retrieved_vectors"],
-            )
-            state["confidence"] = confidence
+        # LangGraph graph run karo
+        # Yeh internally:
+        # planner → tool_selector → tool_executor → observation
+        # → answer_generator → critic → (retry ya end)
+        graph = get_react_graph()
+        final_state = graph.invoke(initial_state)
 
-            decision = critic_agent(state)
+        answer     = final_state.get("answer", "No answer generated.")
+        confidence = final_state.get("confidence", 0.0)
+        sources    = final_state.get("sources", [])
+        trace      = final_state.get("trace", [])
 
-            trace.append({
-                "iteration":  state["iterations"],
-                "confidence": confidence,
-                "decision":   decision["action"],
-            })
+        logger.info(
+            f"[query_worker] Job {job_id} completed | "
+            f"confidence={confidence:.3f} | "
+            f"iterations={final_state.get('iterations', 0)}"
+        )
 
-            logging.info(
-                f"[query_worker] job={job_id} "
-                f"iter={state['iterations']} "
-                f"conf={confidence:.3f} "
-                f"decision={decision['action']}"
-            )
-
-            if decision["action"] == "accept":
-                break
-
-            state["query"] = (
-                f"Original Question:\n{state['original_query']}\n\n"
-                f"Previous Answer (needs improvement):\n{state['answer']}\n\n"
-                "Provide a more accurate answer with specific code references "
-                "(file name, function name, line numbers)."
-            )
-            state["iterations"] += 1
-
+        # Result publish karo — WebSocket browser ko bhejega
         publish_query_complete(
             user_id=user_id,
             job_id=job_id,
-            answer=state["answer"] or "No answer found.",
-            confidence=state["confidence"],
-            sources=result.get("sources", []),
+            answer=answer,
+            confidence=confidence,
+            sources=sources,
             trace=trace,
         )
 
-        logging.info(f"[query_worker] Job {job_id} completed")
         return {"status": "completed", "job_id": job_id}
 
     except Exception as exc:
-        logging.error(f"[query_worker] Job {job_id} failed: {exc}")
+        logger.error(f"[query_worker] Job {job_id} failed: {exc}", exc_info=True)
         try:
             raise self.retry(exc=exc)
         except self.MaxRetriesExceededError:
