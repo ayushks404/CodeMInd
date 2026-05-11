@@ -1,17 +1,20 @@
 # =============================================================================
-# CodeMind — Docker Compose (Phase 1 — Fixed)
+# CodeMind — Docker Compose (Phase 2)
 #
 # HOW TO RUN:
 #   1. Copy ../.env.example to ../.env and fill in GROQ_API_KEY and JWT_SECRET
 #   2. From this directory: docker compose up --build
 #
 # Services:
-#   frontend  :5173  — React/Vite UI
-#   auth      :5000  — Node.js monolith (auth + project + query in Phase 1)
-#   agent     :8000  — FastAPI AI service
-#   qdrant    :6333  — Vector DB (persistent)
-#   mongo     :27017 — MongoDB (migrated to Postgres in Phase 2)
-#   redis     :6379  — Added in Phase 1 fix (required for Phase 2 async queue)
+#   frontend        :5173  — React/Vite UI
+#   auth            :5000  — Node.js monolith
+#   websocket       :5004  — WebSocket real-time bridge
+#   agent           :8000  — FastAPI (health + cleanup only in Phase 2)
+#   query_worker_1/2/3    — Celery workers (query_jobs queue)
+#   index_worker_1/2      — Celery workers (index_jobs queue)
+#   qdrant          :6333  — Vector DB
+#   mongo           :27017 — MongoDB
+#   redis           :6379  — Celery broker + pub/sub
 # =============================================================================
 
 services:
@@ -27,6 +30,7 @@ services:
       - "5173:5173"
     environment:
       - VITE_API_URL=http://localhost:5000/api
+      - VITE_WS_URL=ws://localhost:5004
     depends_on:
       - auth
     networks:
@@ -34,8 +38,8 @@ services:
 
   # ---------------------------------------------------------------------------
   # Auth Service — Node.js monolith :5000
-  # Phase 1: serves /api/auth, /api/project, /api/query on one server
-  # Phase 6: split into 3 independent services on :5001, :5002, :5003
+  # Phase 2: no longer depends on agent directly
+  # Jobs go through Redis queue instead
   # ---------------------------------------------------------------------------
   auth:
     build:
@@ -48,11 +52,28 @@ services:
       - MONGO_URI=mongodb://mongo:27017/codemind
       - JWT_SECRET=${JWT_SECRET}
       - FRONTEND_URL=http://localhost:5173
-      - AI_SERVICE_URL=http://agent:8000
-      - REDIS_URL=redis://redis:6379
+      - REDIS_URL=redis://redis:6379/0
     depends_on:
       - mongo
-      - agent
+      - redis
+    networks:
+      - codemind
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # WebSocket Service — Node.js :5004
+  # Subscribes to Redis pub/sub, pushes events to browser
+  # ---------------------------------------------------------------------------
+  websocket:
+    build:
+      context: ../services/websocket
+      dockerfile: Dockerfile
+    ports:
+      - "5004:5004"
+    environment:
+      - WS_PORT=5004
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
       - redis
     networks:
       - codemind
@@ -60,6 +81,8 @@ services:
 
   # ---------------------------------------------------------------------------
   # AI Agent Service — FastAPI :8000
+  # Phase 2: health check + cleanup only
+  # Heavy work moved to Celery workers
   # ---------------------------------------------------------------------------
   agent:
     build:
@@ -70,8 +93,10 @@ services:
     environment:
       - GROQ_API_KEY=${GROQ_API_KEY}
       - QDRANT_URL=http://qdrant:6333
+      - REDIS_URL=redis://redis:6379/0
     depends_on:
       - qdrant
+      - redis
     volumes:
       - agent_tmp:/app/tmp
     networks:
@@ -84,8 +109,106 @@ services:
       retries: 3
 
   # ---------------------------------------------------------------------------
+  # Query Workers — Celery (HIGH priority)
+  # 3 separate named services = 3 real instances
+  # deploy: replicas does NOT work in docker compose — use named services
+  # ---------------------------------------------------------------------------
+  query_worker_1:
+    build:
+      context: ../services/agent
+      dockerfile: Dockerfile
+    command: celery -A celery_app worker -Q query_jobs --concurrency=1 --loglevel=info -n query_worker_1@%h
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - QDRANT_URL=http://qdrant:6333
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - qdrant
+      - redis
+    volumes:
+      - agent_tmp:/app/tmp
+    networks:
+      - codemind
+    restart: unless-stopped
+
+  query_worker_2:
+    build:
+      context: ../services/agent
+      dockerfile: Dockerfile
+    command: celery -A celery_app worker -Q query_jobs --concurrency=1 --loglevel=info -n query_worker_2@%h
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - QDRANT_URL=http://qdrant:6333
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - qdrant
+      - redis
+    volumes:
+      - agent_tmp:/app/tmp
+    networks:
+      - codemind
+    restart: unless-stopped
+
+  query_worker_3:
+    build:
+      context: ../services/agent
+      dockerfile: Dockerfile
+    command: celery -A celery_app worker -Q query_jobs --concurrency=1 --loglevel=info -n query_worker_3@%h
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - QDRANT_URL=http://qdrant:6333
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - qdrant
+      - redis
+    volumes:
+      - agent_tmp:/app/tmp
+    networks:
+      - codemind
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Index Workers — Celery (LOW priority)
+  # 2 separate named services = 2 real instances
+  # ---------------------------------------------------------------------------
+  index_worker_1:
+    build:
+      context: ../services/agent
+      dockerfile: Dockerfile
+    command: celery -A celery_app worker -Q index_jobs --concurrency=1 --loglevel=info -n index_worker_1@%h
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - QDRANT_URL=http://qdrant:6333
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - qdrant
+      - redis
+    volumes:
+      - agent_tmp:/app/tmp
+    networks:
+      - codemind
+    restart: unless-stopped
+
+  index_worker_2:
+    build:
+      context: ../services/agent
+      dockerfile: Dockerfile
+    command: celery -A celery_app worker -Q index_jobs --concurrency=1 --loglevel=info -n index_worker_2@%h
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - QDRANT_URL=http://qdrant:6333
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - qdrant
+      - redis
+    volumes:
+      - agent_tmp:/app/tmp
+    networks:
+      - codemind
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
   # Qdrant — Vector Database
-  # Dashboard: http://localhost:6333/dashboard
   # ---------------------------------------------------------------------------
   qdrant:
     image: qdrant/qdrant:v1.9.2
@@ -104,8 +227,7 @@ services:
       start_period: 30s
 
   # ---------------------------------------------------------------------------
-  # MongoDB — Phase 1 database
-  # Migrated to PostgreSQL in Phase 2
+  # MongoDB
   # ---------------------------------------------------------------------------
   mongo:
     image: mongo:7
@@ -118,9 +240,7 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
-  # Redis — Added in Phase 1 fix
-  # Phase 1: available but not used yet
-  # Phase 2: Celery queue, pub/sub bridge, session management, caching
+  # Redis — Celery broker + pub/sub + cache
   # ---------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
