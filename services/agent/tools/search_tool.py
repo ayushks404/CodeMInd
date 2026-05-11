@@ -5,7 +5,7 @@ Agent jab bhi codebase mein kuch dhundna chahta hai, yeh tool use karta hai.
 Qdrant se top-k relevant chunks return karta hai with metadata.
 """
 
-from rag.embeddings import get_embeddings
+from rag.embeddings import generate_embeddings
 from rag.vector_store import get_client, _collection_name
 import logging
 
@@ -26,7 +26,7 @@ def search_code(project_id: str, query: str, top_k: int = 5) -> list[dict]:
     """
     try:
         # Query ko vector mein convert karo
-        query_vector = get_embeddings([query])[0].tolist()
+        query_vector = generate_embeddings([query])[0].tolist()
 
         client     = get_client()
         collection = _collection_name(project_id)
