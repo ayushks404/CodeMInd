@@ -47,5 +47,5 @@ celery_app.conf.update(
     result_expires=3600,
 
     # One task at a time per worker — prevents overload
-    worker_prefetch_multiplier=1,
+    worker_prefetch_multiplier=4,
 )
