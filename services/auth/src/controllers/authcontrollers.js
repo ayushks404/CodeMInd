@@ -3,7 +3,6 @@ import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 
 // JWT: 7 days. Refresh: 30 days (Phase 2).
-// Previously hardcoded to 30d for JWT — fixed.
 const generateToken = (id) => {
   return jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: "7d" });
 };
@@ -21,7 +20,6 @@ export const register = async (req, res) => {
       return res.status(400).json({ message: "User already exists" });
     }
 
-    // bcrypt rounds: 12 (was 10)
     const hashpassword = await bcrypt.hash(password, 12);
     const user = await User.create({ name, email, password: hashpassword });
 
@@ -70,11 +68,44 @@ export const login = async (req, res) => {
 // Phase 2 will add Redis token blocklist here.
 export const logout = async (req, res) => {
   try {
-    // Phase 2 addition:
-    // const token = req.headers.authorization.split(" ")[1];
-    // await redis.set(`blocklist:${token}`, "1", "EX", 604800);
     return res.json({ message: "Logged out successfully" });
   } catch (err) {
     return res.status(500).json({ message: err.message });
+  }
+};
+
+/**
+ * POST /api/auth/verify  — internal endpoint, called by WebSocket service
+ * to validate a JWT without sharing the JWT_SECRET across services.
+ *
+ * NOT exposed through Nginx (architecture Section 9.1).
+ * Body: { token: "Bearer eyJ..." }  OR  { token: "eyJ..." }
+ * Returns: { valid: true, user_id: "..." } | { valid: false }
+ */
+export const verify = async (req, res) => {
+  try {
+    let { token } = req.body;
+
+    if (!token) {
+      return res.json({ valid: false });
+    }
+
+    // Strip "Bearer " prefix if present — WS sends raw token, some callers may prefix it
+    if (token.startsWith("Bearer ")) {
+      token = token.slice(7);
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    // Confirm user still exists in DB — catches deleted accounts
+    const user = await User.findById(decoded.id).select("_id");
+    if (!user) {
+      return res.json({ valid: false });
+    }
+
+    return res.json({ valid: true, user_id: user._id.toString() });
+  } catch (err) {
+    // jwt.verify throws on expired / tampered tokens — treat as invalid
+    return res.json({ valid: false });
   }
 };
