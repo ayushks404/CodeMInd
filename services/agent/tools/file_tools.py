@@ -232,3 +232,83 @@ def keyword_search(project_id: str, term: str, max_results: int = 20) -> list[di
 
     logger.info(f"[keyword_search] Found {len(results)} results for '{term}'")
     return results
+
+def get_function_signature(project_id: str, function_name: str) -> dict:
+    """
+    Sirf ek function ka signature return karo — poora body nahi.
+    Agent ko pata chalta hai function kya accept karta hai, kya return karta hai.
+    """
+    repo_path = _get_repo_path(project_id)
+    results = []
+
+    for root, dirs, files in os.walk(repo_path):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for filename in files:
+            _, ext = os.path.splitext(filename)
+            if ext not in {".py", ".js", ".ts", ".jsx", ".tsx"}:
+                continue
+            filepath = os.path.join(root, filename)
+            rel_path = os.path.relpath(filepath, repo_path).replace("\\", "/")
+            try:
+                with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
+                for i, line in enumerate(lines):
+                    if function_name in line and (
+                        "def " in line or "function " in line or "const " in line or "=>" in line
+                    ):
+                        # Signature: current line + next 3 lines
+                        sig_lines = lines[i:i+4]
+                        signature = "".join(sig_lines).strip()
+                        results.append({
+                            "file":       rel_path,
+                            "line":       i + 1,
+                            "signature":  signature,
+                        })
+            except Exception:
+                continue
+
+    return {"function": function_name, "signatures": results}
+
+
+def summarise_file(project_id: str, filepath: str) -> dict:
+    """
+    File ka high-level summary return karo.
+    Poora content nahi — sirf functions, classes, imports list karo.
+    Agent ko architecture samajhne mein help karta hai.
+    """
+    result = read_file(project_id, filepath)
+    if result.get("error") or not result.get("content"):
+        return {"summary": f"Could not read {filepath}", "filepath": filepath}
+
+    content = result["content"]
+    lines   = content.split("\n")
+
+    functions = []
+    classes   = []
+    imports   = []
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("def ") or stripped.startswith("async def "):
+            functions.append(stripped.split("(")[0].replace("def ", "").replace("async def ", ""))
+        elif stripped.startswith("class "):
+            classes.append(stripped.split("(")[0].split(":")[0].replace("class ", ""))
+        elif stripped.startswith("import ") or stripped.startswith("from "):
+            imports.append(stripped)
+
+    summary = f"File: {filepath}\n"
+    summary += f"Total lines: {len(lines)}\n"
+    if classes:
+        summary += f"Classes: {', '.join(classes)}\n"
+    if functions:
+        summary += f"Functions: {', '.join(functions[:15])}\n"
+    if imports:
+        summary += f"Imports ({len(imports)}): {', '.join(imports[:5])}...\n"
+
+    return {
+        "filepath":  filepath,
+        "summary":   summary,
+        "functions": functions,
+        "classes":   classes,
+        "lines":     len(lines),
+    }
