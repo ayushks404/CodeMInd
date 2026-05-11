@@ -1,7 +1,7 @@
 import Project from "../models/project.js";
+import { pushIndexJob } from "../jobs/index_job_producer.js";
 import axios from "axios";
 
-// GitHub URL validator — same regex as Python app.py
 const GITHUB_URL_PATTERN = /^https:\/\/github\.com\/[\w\-]+\/[\w\-\.]+\/?$/;
 
 function validateGithubUrl(url) {
@@ -16,7 +16,6 @@ export const createproject = async (req, res) => {
       return res.status(400).json({ message: "Name and repo URL required" });
     }
 
-    // FIX: validate GitHub URL before touching the database
     if (!validateGithubUrl(repourl)) {
       return res.status(400).json({
         message: "Only public GitHub URLs are supported. Format: https://github.com/owner/repo",
@@ -31,22 +30,29 @@ export const createproject = async (req, res) => {
     const project = await Project.create({
       name,
       repourl,
-      owner: req.user._id,
+      owner:   req.user._id,
       indexed: false,
     });
 
-    // Fire-and-forget — do not await, do not block the response
-    const AI_SERVICE = process.env.AI_SERVICE_URL;
-    axios
-      .post(`${AI_SERVICE}/index-repo`, {
-        project_id: project._id.toString(),
-        repo_url: repourl,
-      })
-      .catch((err) => {
-        console.error("AI indexing trigger failed:", err.message);
-      });
+    const userId    = req.user._id.toString();
+    const projectId = project._id.toString();
 
-    return res.status(201).json({ project });
+    // Phase 2: Celery index_jobs queue mein push karo
+    // user_id zaroori hai taaki WebSocket notification sahi user ko jaaye
+    pushIndexJob({
+      projectId,
+      userId,
+      repoUrl: repourl,
+    }).catch((err) => {
+      console.error("Index job push failed:", err.message);
+    });
+
+    // Architecture ke according response shape
+    return res.status(201).json({
+      project_id: projectId,
+      status:     "indexing",
+    });
+
   } catch (err) {
     console.error("Create project error:", err);
     return res.status(500).json({ message: err.message });
@@ -56,7 +62,7 @@ export const createproject = async (req, res) => {
 export const getProjectById = async (req, res) => {
   try {
     const project = await Project.findOne({
-      _id: req.params.id,
+      _id:   req.params.id,
       owner: req.user._id,
     });
 
@@ -65,22 +71,19 @@ export const getProjectById = async (req, res) => {
     }
 
     return res.json({
-      name: project.name,
+      id:      project._id,
+      name:    project.name,
       repourl: project.repourl,
-      // FIX: was project.index (undefined) — field in schema is `indexed`
       indexed: project.indexed,
     });
   } catch (err) {
-    console.error("Get project error:", err);
     return res.status(500).json({ message: err.message });
   }
 };
 
 export const getUserProjects = async (req, res) => {
   try {
-    const projects = await Project.find({ owner: req.user._id }).sort({
-      createdAt: -1,
-    });
+    const projects = await Project.find({ owner: req.user._id }).sort({ createdAt: -1 });
     return res.json({ projects });
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -90,7 +93,7 @@ export const getUserProjects = async (req, res) => {
 export const deleteProject = async (req, res) => {
   try {
     const project = await Project.findOne({
-      _id: req.params.id,
+      _id:   req.params.id,
       owner: req.user._id,
     });
 
@@ -98,7 +101,6 @@ export const deleteProject = async (req, res) => {
       return res.status(404).json({ message: "Project not found" });
     }
 
-    // Trigger AI cleanup before deleting from DB
     const AI_SERVICE = process.env.AI_SERVICE_URL;
     try {
       await axios.post(`${AI_SERVICE}/cleanup`, {
@@ -106,11 +108,9 @@ export const deleteProject = async (req, res) => {
       });
     } catch (err) {
       console.error("AI cleanup failed:", err.message);
-      // Continue with deletion even if AI cleanup fails
     }
 
     await Project.deleteOne({ _id: project._id });
-
     return res.json({ message: "Project deleted successfully" });
   } catch (err) {
     return res.status(500).json({ message: err.message });
