@@ -25,3 +25,9 @@ scikit-learn
 
 # Pydantic validation
 pydantic
+
+# Celery — async task queue
+celery==5.3.6
+
+# Redis — Celery broker + pub/sub publisher
+redis==5.0.1
