@@ -43,8 +43,12 @@ export default function Dashboard() {
         name: name.trim(),
         repourl: repo.trim(),
       });
-      const projectId = res.data.project._id;
+
+      // Phase 2 response shape: { project_id, status: "indexing" }
+      // Pehle tha: { project: { _id: ... } }
+      const projectId = res.data.project_id;
       navigate(`/query/${projectId}`);
+
     } catch (e) {
       alert(e.response?.data?.message || "Failed to create project");
     } finally {
