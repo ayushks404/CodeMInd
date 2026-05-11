@@ -7,6 +7,7 @@ WebSocket service subscribes and pushes to browser.
 
 Events:
 - query_complete    → answer ready hai
+- answer_chunk      → LLM ka ek token/chunk (streaming)
 - indexing_complete → repo indexed ho gaya
 - agent_step        → agent ne ek tool use kiya (Phase 3 new)
 - job_failed        → kuch toot gaya
@@ -17,59 +18,93 @@ import json
 import redis
 import logging
 
+logger = logging.getLogger(__name__)
+
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
 _redis_client = None
 
+
 def get_redis():
-     """Singleton Redis client — ek baar connect karo, baar baar use karo."""
+    """Singleton Redis client — ek baar connect karo, baar baar use karo."""
     global _redis_client
     if _redis_client is None:
         _redis_client = redis.from_url(REDIS_URL, decode_responses=True)
     return _redis_client
 
 
-def publish_query_complete(user_id: str, job_id: str, answer: str,
-                           confidence: float, sources: list, trace: list):
+def publish_query_complete(
+    user_id: str,
+    job_id: str,
+    answer: str,
+    confidence: float,
+    sources: list,
+    trace: list,
+):
     """
     Query complete — answer ready hai.
     WebSocket service yeh receive karke browser ko push karega.
     """
     channel = f"ws:notify:{user_id}"
-    message = json.dumps({
+    payload = {
         "event":      "query_complete",
         "job_id":     job_id,
         "answer":     answer,
         "confidence": confidence,
         "sources":    sources,
         "trace":      trace,
-    })
+    }
     try:
-        get_redis().publish(channel, message)
-        logging.info(f"[publisher] query_complete published for job  {job_id}")
+        get_redis().publish(channel, json.dumps(payload))
+        logger.info(f"[publisher] query_complete published for job {job_id}")
     except Exception as e:
-        logging.error(f"[publisher] Failed to publish query_complete: {e}")
+        logger.error(f"[publisher] Failed to publish query_complete: {e}")
 
 
-def publish_indexing_complete(user_id: str, project_id: str,
-                               file_count: int, chunk_count: int):
+def publish_answer_chunk(user_id: str, job_id: str, chunk: str):
+    """
+    LLM streaming — ek token/chunk publish karo as it arrives.
+
+    Python side: llm.stream() se har AIMessageChunk ke liye call karo.
+    Frontend: answer_chunk events accumulate karke live typewriter effect dikhata hai.
+
+    query_complete still fires at the end with sources, trace, confidence.
+    """
+    channel = f"ws:notify:{user_id}"
+    payload = {
+        "event":  "answer_chunk",
+        "job_id": job_id,
+        "chunk":  chunk,
+    }
+    try:
+        get_redis().publish(channel, json.dumps(payload))
+    except Exception as e:
+        # Don't log every chunk — just count errors silently
+        logger.debug(f"[publisher] answer_chunk publish failed: {e}")
+
+
+def publish_indexing_complete(
+    user_id: str,
+    project_id: str,
+    file_count: int,
+    chunk_count: int,
+):
     """
     Indexing complete — repo indexed ho gaya.
     Frontend project status update karega.
     """
     channel = f"ws:notify:{user_id}"
-    message = json.dumps({
+    payload = {
         "event":       "indexing_complete",
         "project_id":  project_id,
         "file_count":  file_count,
         "chunk_count": chunk_count,
-    })
+    }
     try:
         get_redis().publish(channel, json.dumps(payload))
         logger.info(f"[publisher] indexing_complete published for project {project_id}")
     except Exception as e:
         logger.error(f"[publisher] Failed to publish indexing_complete: {e}")
-
 
 
 def publish_agent_step(
@@ -105,20 +140,25 @@ def publish_agent_step(
         logger.error(f"[publisher] Failed to publish agent_step: {e}")
 
 
-def publish_job_failed(user_id: str, job_id: str, reason: str, retryable: bool = True):
-    
+def publish_job_failed(
+    user_id: str,
+    job_id: str,
+    reason: str,
+    retryable: bool = True,
+):
     """
     Job fail ho gaya — frontend ko batao.
     Retry button dikhana hai ya nahi yeh retryable flag se decide hoga.
     """
     channel = f"ws:notify:{user_id}"
-    message = json.dumps({
+    payload = {
         "event":     "job_failed",
         "job_id":    job_id,
         "reason":    reason,
         "retryable": retryable,
-    })
+    }
     try:
-        get_redis().publish(channel, message)
+        get_redis().publish(channel, json.dumps(payload))
+        logger.info(f"[publisher] job_failed published for job {job_id}")
     except Exception as e:
-        logging.error(f"Redis publish failed: {e}")
+        logger.error(f"[publisher] Failed to publish job_failed: {e}")
