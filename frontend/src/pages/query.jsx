@@ -1,19 +1,23 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import API from "../api";
-import { Send, Loader2, Sparkles, FileText, ChevronDown, ChevronUp } from "lucide-react";
+import { useAuth } from "../context/AuthContext";
+import { useJobPoller } from "../hooks/useJobPoller";
+import { useWebSocket } from "../hooks/useWebSocket";
 
-// =============================================================================
-// AgentTrace
-// =============================================================================
+import {
+  Send, Loader2, Sparkles, FileText,
+  ChevronDown, ChevronUp
+} from "lucide-react";
+
+// ── AgentTrace ─────────────────────────────────────────────
 function AgentTrace({ trace }) {
   const [open, setOpen] = useState(false);
   if (!trace || trace.length === 0) return null;
-
   return (
     <div className="mt-2 text-xs">
       <button
@@ -39,17 +43,14 @@ function AgentTrace({ trace }) {
   );
 }
 
-// =============================================================================
-// SourceList
-// =============================================================================
+// ── SourceList ─────────────────────────────────────────────
 function SourceList({ sources }) {
   if (!sources || sources.length === 0) return null;
   const unique = [...new Map(sources.map((s) => [s.file, s])).values()];
   return (
     <div className="mt-3 pt-3 border-t border-gray-700 text-xs text-gray-400">
       <div className="flex items-center gap-1 mb-1">
-        <FileText size={12} />
-        Sources
+        <FileText size={12} /> Sources
       </div>
       {unique.map((s, i) => (
         <div key={i} className="pl-2">
@@ -62,9 +63,7 @@ function SourceList({ sources }) {
   );
 }
 
-// =============================================================================
-// MarkdownMessage
-// =============================================================================
+// ── MarkdownMessage ────────────────────────────────────────
 function MarkdownMessage({ text }) {
   return (
     <ReactMarkdown
@@ -105,17 +104,93 @@ function MarkdownMessage({ text }) {
   );
 }
 
-// =============================================================================
-// Main Query Page
-// =============================================================================
+// ── Main Query Page ────────────────────────────────────────
 export default function Query() {
   const { projectId } = useParams();
   const [question,    setQuestion]    = useState("");
   const [messages,    setMessages]    = useState([]);
   const [loading,     setLoading]     = useState(false);
   const [projectName, setProjectName] = useState("");
+  const [currentJobId, setCurrentJobId] = useState(null);
+  const [wsConnected,  setWsConnected]  = useState(false);
   const boxRef = useRef();
 
+  // Get user_id from localStorage token
+  // We decode JWT to get user_id for WebSocket connection
+  const getUserId = () => {
+    const token = localStorage.getItem("cp_token");
+    if (!token) return null;
+    try {
+      const payload = JSON.parse(atob(token.split(".")[1]));
+      return payload.id;
+    } catch {
+      return null;
+    }
+  };
+
+  const { user } = useAuth();
+  const userId = user?._id;
+
+  // Handle incoming WebSocket messages
+  const handleWsMessage = useCallback((data) => {
+    if (data.event === "connected") {
+      setWsConnected(true);
+      return;
+    }
+
+    if (data.event === "query_complete") {
+      setLoading(false);
+      setCurrentJobId(null);
+      setMessages((m) => [...m, {
+        role:       "ai",
+        text:       data.answer ?? "No answer received.",
+        sources:    data.sources ?? [],
+        trace:      data.trace ?? [],
+        confidence: data.confidence ?? null,
+      }]);
+    }
+
+    if (data.event === "job_failed") {
+      setLoading(false);
+      setCurrentJobId(null);
+      setMessages((m) => [...m, {
+        role:    "ai",
+        text:    `Query failed: ${data.reason}`,
+        sources: [],
+        trace:   [],
+      }]);
+    }
+  }, []);
+
+  // WebSocket connection
+  useWebSocket(userId, handleWsMessage);
+
+  // Fallback polling — only active when WS is not connected
+  useJobPoller(
+    currentJobId,
+    ({ success, data, reason }) => {
+      setLoading(false);
+      setCurrentJobId(null);
+      if (success) {
+        setMessages((m) => [...m, {
+          role:       "ai",
+          text:       data.answer ?? "No answer received.",
+          sources:    data.sources ?? [],
+          trace:      data.trace ?? [],
+          confidence: data.confidence ?? null,
+        }]);
+      } else {
+        setMessages((m) => [...m, {
+          role: "ai",
+          text: `Query failed: ${reason}`,
+          sources: [], trace: [],
+        }]);
+      }
+    },
+    !wsConnected // only poll if WebSocket is not connected
+  );
+
+  // Load project name
   useEffect(() => {
     const loadProject = async () => {
       try {
@@ -128,6 +203,7 @@ export default function Query() {
     if (projectId) loadProject();
   }, [projectId]);
 
+  // Auto scroll
   useEffect(() => {
     if (boxRef.current) {
       boxRef.current.scrollTop = boxRef.current.scrollHeight;
@@ -143,22 +219,25 @@ export default function Query() {
     setLoading(true);
 
     try {
-      const res = await API.post("/query", { project_id: projectId, question });
+      // Returns job_id immediately — no waiting for LLM
+      const res = await API.post("/query", {
+        project_id: projectId,
+        question,
+      });
 
-      // FIX: no more guess chain — backend now always returns these exact keys
-      const answer     = res.data.answer     ?? "No answer received.";
-      const sources    = res.data.sources    ?? [];
-      const trace      = res.data.trace      ?? [];
-      const confidence = res.data.confidence ?? null;
+      const jobId = res.data.job_id;
+      setCurrentJobId(jobId);
 
-      setMessages((m) => [...m, { role: "ai", text: answer, sources, trace, confidence }]);
+      // Now wait for WebSocket event OR fallback polling
+      // Loading state stays true until answer arrives
+
     } catch (e) {
-      setMessages((m) => [
-        ...m,
-        { role: "ai", text: "Query failed. Please try again.", sources: [], trace: [] },
-      ]);
-    } finally {
       setLoading(false);
+      setMessages((m) => [...m, {
+        role: "ai",
+        text: "Failed to submit question. Please try again.",
+        sources: [], trace: [],
+      }]);
     }
   };
 
@@ -174,8 +253,15 @@ export default function Query() {
               <p className="text-xs text-gray-500">Ask anything about your codebase</p>
             </div>
           </div>
-          <div className="text-sm text-gray-400">
-            Project: <span className="text-white font-medium">{projectName || "Loading..."}</span>
+          <div className="flex items-center gap-3">
+            {/* WebSocket status indicator */}
+            <div className={`w-2 h-2 rounded-full ${wsConnected ? "bg-green-500" : "bg-yellow-500"}`} />
+            <span className="text-xs text-gray-500">
+              {wsConnected ? "Live" : "Polling"}
+            </span>
+            <div className="text-sm text-gray-400">
+              Project: <span className="text-white font-medium">{projectName || "Loading..."}</span>
+            </div>
           </div>
         </div>
 
@@ -191,28 +277,24 @@ export default function Query() {
 
           {messages.map((m, i) => (
             <div key={i} className={m.role === "user" ? "flex justify-end" : "flex justify-start"}>
-              <div
-                className={`max-w-3xl px-4 py-3 rounded-xl ${
-                  m.role === "user"
-                    ? "bg-blue-600 text-white"
-                    : "bg-gray-800 border border-gray-700"
-                }`}
-              >
+              <div className={`max-w-3xl px-4 py-3 rounded-xl ${
+                m.role === "user"
+                  ? "bg-blue-600 text-white"
+                  : "bg-gray-800 border border-gray-700"
+              }`}>
                 {m.role === "user" ? (
                   <p className="text-white">{m.text}</p>
                 ) : (
                   <>
                     {m.confidence !== null && m.confidence !== undefined && (
                       <div className="flex items-center gap-2 mb-2">
-                        <div
-                          className={`text-xs px-2 py-0.5 rounded-full ${
-                            m.confidence >= 0.8
-                              ? "bg-green-900 text-green-300"
-                              : m.confidence >= 0.5
-                              ? "bg-yellow-900 text-yellow-300"
-                              : "bg-red-900 text-red-300"
-                          }`}
-                        >
+                        <div className={`text-xs px-2 py-0.5 rounded-full ${
+                          m.confidence >= 0.8
+                            ? "bg-green-900 text-green-300"
+                            : m.confidence >= 0.5
+                            ? "bg-yellow-900 text-yellow-300"
+                            : "bg-red-900 text-red-300"
+                        }`}>
                           {(m.confidence * 100).toFixed(0)}% confidence
                         </div>
                       </div>
@@ -230,7 +312,7 @@ export default function Query() {
             <div className="flex justify-start">
               <div className="bg-gray-800 border border-gray-700 px-4 py-3 rounded-xl flex items-center gap-2 text-gray-400 text-sm">
                 <Loader2 className="animate-spin" size={16} />
-                Searching codebase...
+                Thinking... (this may take 30–60 seconds)
               </div>
             </div>
           )}
@@ -254,15 +336,9 @@ export default function Query() {
               className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed px-4 py-2 rounded-lg text-white flex items-center gap-2 transition-colors"
             >
               {loading ? (
-                <>
-                  <Loader2 size={16} className="animate-spin" />
-                  Thinking...
-                </>
+                <><Loader2 size={16} className="animate-spin" /> Thinking...</>
               ) : (
-                <>
-                  Send
-                  <Send size={16} />
-                </>
+                <><Send size={16} /> Send</>
               )}
             </button>
           </div>
