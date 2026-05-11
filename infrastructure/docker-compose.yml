@@ -38,8 +38,6 @@ services:
 
   # ---------------------------------------------------------------------------
   # Auth Service — Node.js monolith :5000
-  # Phase 2: no longer depends on agent directly
-  # Jobs go through Redis queue instead
   # ---------------------------------------------------------------------------
   auth:
     build:
@@ -73,16 +71,19 @@ services:
     environment:
       - WS_PORT=5004
       - REDIS_URL=redis://redis:6379/0
+      # Points to the auth service container on the internal Docker network.
+      # Service name = "auth", port = 5000 (matches auth service PORT env).
+      # This is what server.js uses to call POST /api/auth/verify.
+      - AUTH_SERVICE_URL=http://auth:5000
     depends_on:
       - redis
+      - auth
     networks:
       - codemind
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
   # AI Agent Service — FastAPI :8000
-  # Phase 2: health check + cleanup only
-  # Heavy work moved to Celery workers
   # ---------------------------------------------------------------------------
   agent:
     build:
@@ -110,8 +111,6 @@ services:
 
   # ---------------------------------------------------------------------------
   # Query Workers — Celery (HIGH priority)
-  # 3 separate named services = 3 real instances
-  # deploy: replicas does NOT work in docker compose — use named services
   # ---------------------------------------------------------------------------
   query_worker_1:
     build:
@@ -169,7 +168,6 @@ services:
 
   # ---------------------------------------------------------------------------
   # Index Workers — Celery (LOW priority)
-  # 2 separate named services = 2 real instances
   # ---------------------------------------------------------------------------
   index_worker_1:
     build:
