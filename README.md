@@ -1,4 +1,4 @@
-# CodeMind AI
+# CodeMind AI(currently at PHASE 3)
 
 > Ask anything about a GitHub codebase in plain English.  
 > Get cited, confidence-scored answers with live agent reasoning.
