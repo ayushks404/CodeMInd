@@ -408,42 +408,202 @@ def observation_node(state: AgentState) -> AgentState:
 # Saari gathered information se final answer banao
 # =============================================================================
 
-def answer_generator_node(state: AgentState) -> AgentState:
-    """
-    Tool results ko combine karke LLM se answer banao.
+# def answer_generator_node(state: AgentState) -> AgentState:
+#     """
+#     Tool results ko combine karke LLM se answer banao.
 
-    Token budget: Groq free tier = 12000 TPM.
-    - Har search chunk: max 800 chars
-    - read_file: max 1500 chars
-    - file_tree: max 800 chars
-    - keyword results: max 5 lines
-    - Total context hard cap: 4000 chars
-    - max_tokens response: 800
-    Yeh limits rate_limit_exceeded error se bachate hain.
-    """
+#     Token budget: Groq free tier = 12000 TPM.
+#     - Har search chunk: max 800 chars
+#     - read_file: max 1500 chars
+#     - file_tree: max 800 chars
+#     - keyword results: max 5 lines
+#     - Total context hard cap: 4000 chars
+#     - max_tokens response: 800
+#     Yeh limits rate_limit_exceeded error se bachate hain.
+#     """
+#     import time
+
+#     logger.info(f"[answer_generator] Generating answer for job {state['job_id']}")
+
+#     question     = state["original_question"]
+#     tool_results = state.get("tool_results", [])
+
+#     # ── Token-safe context builder ──────────────────────────────────────────
+#     # Each piece is trimmed before appending.
+#     # Total context capped at 4000 chars to stay under TPM limit.
+#     CHUNK_LIMIT    = 800   # per search/qdrant chunk
+#     FILE_LIMIT     = 1500  # per read_file result
+#     TREE_LIMIT     = 800   # file tree is verbose but low-value
+#     KEYWORD_LINES  = 5     # max keyword_search lines included
+#     CONTEXT_CAP    = 4000  # total context hard cap
+
+#     context_parts = []
+#     sources       = []
+
+#     for result in tool_results:
+#         if isinstance(result, list):
+#             keyword_count = 0
+#             for chunk in result:
+#                 if not isinstance(chunk, dict):
+#                     continue
+
+#                 if "content" in chunk and chunk["content"]:
+#                     file_info = f"File: {chunk.get('file', 'unknown')}"
+#                     if chunk.get("function_name"):
+#                         file_info += f" | Function: {chunk['function_name']}()"
+#                     if chunk.get("start_line"):
+#                         file_info += f" | Lines: {chunk['start_line']}-{chunk['end_line']}"
+
+#                     trimmed = chunk["content"][:CHUNK_LIMIT]
+#                     context_parts.append(f"--- {file_info} ---\n{trimmed}")
+
+#                     if chunk.get("file"):
+#                         sources.append({
+#                             "file":          chunk["file"],
+#                             "function_name": chunk.get("function_name"),
+#                             "start_line":    chunk.get("start_line"),
+#                             "end_line":      chunk.get("end_line"),
+#                         })
+
+#                 elif "line_content" in chunk:
+#                     if keyword_count >= KEYWORD_LINES:
+#                         continue
+#                     context_parts.append(
+#                         f"File: {chunk.get('file')} | "
+#                         f"Line {chunk.get('line_number')}: {chunk.get('line_content')}"
+#                     )
+#                     if chunk.get("file"):
+#                         sources.append({"file": chunk["file"]})
+#                     keyword_count += 1
+
+#         elif isinstance(result, dict):
+#             if result.get("content"):
+#                 trimmed = result["content"][:FILE_LIMIT]
+#                 context_parts.append(
+#                     f"--- File: {result.get('filepath', 'unknown')} ---\n{trimmed}"
+#                 )
+#                 if result.get("filepath"):
+#                     sources.append({"file": result["filepath"]})
+
+#             elif result.get("tree"):
+#                 trimmed = result["tree"][:TREE_LIMIT]
+#                 context_parts.append(f"--- Repository Structure ---\n{trimmed}")
+
+#     # Hard cap on total context
+#     raw_context = "\n\n".join(context_parts) if context_parts else "No relevant code found."
+#     context     = raw_context[:CONTEXT_CAP]
+#     if len(raw_context) > CONTEXT_CAP:
+#         context += "\n[... context trimmed to stay within token limits ...]"
+
+#     # Duplicate sources remove karo
+#     seen_files     = set()
+#     unique_sources = []
+#     for s in sources:
+#         if s["file"] not in seen_files:
+#             seen_files.add(s["file"])
+#             unique_sources.append(s)
+
+#     system_prompt = (
+#         "You are CodeMind, a precise code analysis assistant. "
+#         "Answer using only the provided code context. "
+#         "Reference specific files, functions, and line numbers. "
+#         "Use markdown. "
+#         "Keep your answer under 300 words unless the question specifically "
+#         "asks for a detailed explanation. "
+#         "Do not repeat information already stated."
+#     )
+
+#     user_prompt = (
+#         f"Question: {question}\n\n"
+#         f"Code Context:\n{context}\n\n"
+#         "Answer based on the code above. Reference specific files and functions."
+#     )
+
+#     # ── LLM call with rate-limit retry ─────────────────────────────────────
+#     # Groq returns 429 with a wait time in the error message.
+#     # We parse it and sleep exactly that long, then retry once.
+#     MAX_RETRIES = 2
+#     answer      = ""
+
+#     for attempt in range(MAX_RETRIES):
+#         try:
+#             llm = get_llm()
+
+#             for chunk in llm.stream(
+#                 [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)],
+#                 config={"max_tokens": 800},   # keep response tokens low
+#             ):
+#                 token = chunk.content
+#                 if token:
+#                     answer += token
+#                     publish_answer_chunk(
+#                         user_id=state["user_id"],
+#                         job_id=state["job_id"],
+#                         chunk=token,
+#                     )
+#             break  # success — exit retry loop
+
+#         except Exception as e:
+#             err_str = str(e)
+#             logger.error(f"[answer_generator] LLM error (attempt {attempt+1}): {err_str}")
+
+#             # Parse wait time from Groq 429 message: "Please try again in X.XXXs"
+#             if "rate_limit_exceeded" in err_str or "429" in err_str:
+#                 import re
+#                 match = re.search(r"try again in (\d+\.?\d*)s", err_str)
+#                 wait  = float(match.group(1)) + 0.5 if match else 5.0
+#                 logger.warning(f"[answer_generator] Rate limited — waiting {wait:.1f}s before retry")
+#                 time.sleep(wait)
+#                 if attempt == MAX_RETRIES - 1:
+#                     answer = (
+#                         "Rate limit reached on the AI provider. "
+#                         "Please wait a moment and try again."
+#                     )
+#             else:
+#                 answer = f"Error generating answer: {err_str}"
+#                 break
+
+#     new_state            = dict(state)
+#     new_state["answer"]  = answer
+#     new_state["sources"] = unique_sources
+#     return new_state
+
+def answer_generator_node(state: AgentState) -> AgentState:
     import time
+    import re as _re
 
     logger.info(f"[answer_generator] Generating answer for job {state['job_id']}")
 
     question     = state["original_question"]
     tool_results = state.get("tool_results", [])
 
-    # ── Token-safe context builder ──────────────────────────────────────────
-    # Each piece is trimmed before appending.
-    # Total context capped at 4000 chars to stay under TPM limit.
-    CHUNK_LIMIT    = 800   # per search/qdrant chunk
-    FILE_LIMIT     = 1500  # per read_file result
-    TREE_LIMIT     = 800   # file tree is verbose but low-value
-    KEYWORD_LINES  = 5     # max keyword_search lines included
-    CONTEXT_CAP    = 4000  # total context hard cap
+    # ── Smart context builder ───────────────────────────────────────────────
+    # Chars se count karo — roughly 1 token = 4 chars for code
+    # Token budget breakdown:
+    #   System prompt  ~120 tokens  (~480 chars)
+    #   Question       ~50 tokens   (~200 chars)
+    #   Context        ~900 tokens  (~3600 chars)  ← yahan max dete hain
+    #   Response       ~800 tokens
+    #   Total          ~1870 tokens  — comfortably under 6000 TPM
+    TOKEN_BUDGET  = 3600   # chars for context
+    CHUNK_LIMIT   = 700    # per qdrant chunk — trimmed before adding
+    FILE_LIMIT    = 1400   # per read_file
+    TREE_LIMIT    = 600    # file tree low value per token
+    KEYWORD_LINES = 5
 
     context_parts = []
     sources       = []
+    total_chars   = 0
 
     for result in tool_results:
+        if total_chars >= TOKEN_BUDGET:
+            break
+
         if isinstance(result, list):
             keyword_count = 0
             for chunk in result:
+                if total_chars >= TOKEN_BUDGET:
+                    break
                 if not isinstance(chunk, dict):
                     continue
 
@@ -455,7 +615,9 @@ def answer_generator_node(state: AgentState) -> AgentState:
                         file_info += f" | Lines: {chunk['start_line']}-{chunk['end_line']}"
 
                     trimmed = chunk["content"][:CHUNK_LIMIT]
-                    context_parts.append(f"--- {file_info} ---\n{trimmed}")
+                    part    = f"--- {file_info} ---\n{trimmed}"
+                    context_parts.append(part)
+                    total_chars += len(part)
 
                     if chunk.get("file"):
                         sources.append({
@@ -465,49 +627,51 @@ def answer_generator_node(state: AgentState) -> AgentState:
                             "end_line":      chunk.get("end_line"),
                         })
 
-                elif "line_content" in chunk:
-                    if keyword_count >= KEYWORD_LINES:
-                        continue
-                    context_parts.append(
+                elif "line_content" in chunk and keyword_count < KEYWORD_LINES:
+                    part = (
                         f"File: {chunk.get('file')} | "
                         f"Line {chunk.get('line_number')}: {chunk.get('line_content')}"
                     )
+                    context_parts.append(part)
+                    total_chars += len(part)
                     if chunk.get("file"):
                         sources.append({"file": chunk["file"]})
                     keyword_count += 1
 
         elif isinstance(result, dict):
+            if total_chars >= TOKEN_BUDGET:
+                break
             if result.get("content"):
                 trimmed = result["content"][:FILE_LIMIT]
-                context_parts.append(
-                    f"--- File: {result.get('filepath', 'unknown')} ---\n{trimmed}"
-                )
+                part    = f"--- File: {result.get('filepath', 'unknown')} ---\n{trimmed}"
+                context_parts.append(part)
+                total_chars += len(part)
                 if result.get("filepath"):
                     sources.append({"file": result["filepath"]})
 
             elif result.get("tree"):
                 trimmed = result["tree"][:TREE_LIMIT]
-                context_parts.append(f"--- Repository Structure ---\n{trimmed}")
+                part    = f"--- Repository Structure ---\n{trimmed}"
+                context_parts.append(part)
+                total_chars += len(part)
 
-    # Hard cap on total context
-    raw_context = "\n\n".join(context_parts) if context_parts else "No relevant code found."
-    context     = raw_context[:CONTEXT_CAP]
-    if len(raw_context) > CONTEXT_CAP:
-        context += "\n[... context trimmed to stay within token limits ...]"
+    context = "\n\n".join(context_parts) if context_parts else "No relevant code found."
 
-    # Duplicate sources remove karo
-    seen_files     = set()
+    # Deduplicate sources
+    seen           = set()
     unique_sources = []
     for s in sources:
-        if s["file"] not in seen_files:
-            seen_files.add(s["file"])
+        if s["file"] not in seen:
+            seen.add(s["file"])
             unique_sources.append(s)
 
     system_prompt = (
         "You are CodeMind, a precise code analysis assistant. "
         "Answer using only the provided code context. "
         "Reference specific files, functions, and line numbers. "
-        "Use markdown. Be concise."
+        "Use markdown. "
+        "Be thorough but do not repeat information. "
+        "If the context is insufficient, say so explicitly."
     )
 
     user_prompt = (
@@ -516,19 +680,15 @@ def answer_generator_node(state: AgentState) -> AgentState:
         "Answer based on the code above. Reference specific files and functions."
     )
 
-    # ── LLM call with rate-limit retry ─────────────────────────────────────
-    # Groq returns 429 with a wait time in the error message.
-    # We parse it and sleep exactly that long, then retry once.
     MAX_RETRIES = 2
     answer      = ""
 
     for attempt in range(MAX_RETRIES):
         try:
             llm = get_llm()
-
             for chunk in llm.stream(
                 [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)],
-                config={"max_tokens": 800},   # keep response tokens low
+                config={"max_tokens": 1000},  # 800 → 1000 — thoda zyada room
             ):
                 token = chunk.content
                 if token:
@@ -538,23 +698,20 @@ def answer_generator_node(state: AgentState) -> AgentState:
                         job_id=state["job_id"],
                         chunk=token,
                     )
-            break  # success — exit retry loop
+            break
 
         except Exception as e:
             err_str = str(e)
             logger.error(f"[answer_generator] LLM error (attempt {attempt+1}): {err_str}")
 
-            # Parse wait time from Groq 429 message: "Please try again in X.XXXs"
             if "rate_limit_exceeded" in err_str or "429" in err_str:
-                import re
-                match = re.search(r"try again in (\d+\.?\d*)s", err_str)
+                match = _re.search(r"try again in (\d+\.?\d*)s", err_str)
                 wait  = float(match.group(1)) + 0.5 if match else 5.0
-                logger.warning(f"[answer_generator] Rate limited — waiting {wait:.1f}s before retry")
+                logger.warning(f"[answer_generator] Rate limited — waiting {wait:.1f}s")
                 time.sleep(wait)
                 if attempt == MAX_RETRIES - 1:
                     answer = (
-                        "Rate limit reached on the AI provider. "
-                        "Please wait a moment and try again."
+                        "Rate limit reached. Please wait a moment and try again."
                     )
             else:
                 answer = f"Error generating answer: {err_str}"
@@ -564,8 +721,6 @@ def answer_generator_node(state: AgentState) -> AgentState:
     new_state["answer"]  = answer
     new_state["sources"] = unique_sources
     return new_state
-
-
 # =============================================================================
 # Node 6 — Critic
 # Answer ka quality check karo
