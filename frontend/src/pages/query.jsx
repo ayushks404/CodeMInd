@@ -107,49 +107,41 @@ function MarkdownMessage({ text }) {
 // ── Main Query Page ────────────────────────────────────────
 export default function Query() {
   const { projectId } = useParams();
-  const [question,     setQuestion]    = useState("");
-  const [messages,     setMessages]    = useState([]);
-  const [loading,      setLoading]     = useState(false);
-  const [projectName,  setProjectName] = useState("");
-  const [currentJobId, setCurrentJobId] = useState(null);
-  const [wsConnected,  setWsConnected]  = useState(false);
-  const [agentSteps,   setAgentSteps]   = useState([]);
-  const [streamingText, setStreamingText] = useState("");  // accumulates answer_chunk tokens
+  const [question,      setQuestion]     = useState("");
+  const [messages,      setMessages]     = useState([]);
+  const [loading,       setLoading]      = useState(false);
+  const [projectName,   setProjectName]  = useState("");
+  const [currentJobId,  setCurrentJobId] = useState(null);
+  const [wsConnected,   setWsConnected]  = useState(false);
+  const [agentSteps,    setAgentSteps]   = useState([]);
+  const [streamingText, setStreamingText] = useState("");
   const boxRef = useRef();
 
   const { user } = useAuth();
   const userId = user?._id;
 
-  /**
-   * currentJobIdRef — lets the WS message handler read the CURRENT job ID
-   * without being re-created every time currentJobId state changes.
-   *
-   * This is the core fix: the handler is passed into useWebSocket once and
-   * never changes. It must read currentJobId via a ref, not via closure,
-   * otherwise it always sees the stale value from the first render (null).
-   */
+  // ── Refs — prevent stale closures in WS handler ──────────
   const currentJobIdRef = useRef(null);
   useEffect(() => {
     currentJobIdRef.current = currentJobId;
   }, [currentJobId]);
 
-  /**
-   * handleWsMessage — plain function, NOT wrapped in useCallback.
-   *
-   * Why no useCallback? Because useWebSocket now stores it in a ref
-   * internally, so it doesn't matter if this function identity changes
-   * on every render. Wrapping it in useCallback here would just add
-   * noise and tempt future devs to add deps that break things again.
-   */
+  // FIX: streamingText ref — query_complete handler mein
+  // setStreamingText se latest value nahi milti (stale closure).
+  // Ref se hamesha current accumulated text milta hai.
+  const streamingTextRef = useRef("");
+  useEffect(() => {
+    streamingTextRef.current = streamingText;
+  }, [streamingText]);
+
+  // ── WebSocket message handler ─────────────────────────────
   const handleWsMessage = (data) => {
-    // Server sends this immediately on connection — marks WS as live
     if (data.event === "connected") {
       setWsConnected(true);
       return;
     }
 
     if (data.event === "agent_step") {
-      // Use ref to get current job ID — never stale
       const activeJobId = currentJobIdRef.current;
       if (data.job_id === activeJobId) {
         setAgentSteps((prev) => [...prev, {
@@ -161,8 +153,6 @@ export default function Query() {
       return;
     }
 
-    // Live token stream — accumulate chunks into streamingText
-    // Backend publishes one answer_chunk per LLM token
     if (data.event === "answer_chunk") {
       if (data.job_id === currentJobIdRef.current) {
         setStreamingText((prev) => prev + (data.chunk || ""));
@@ -171,15 +161,23 @@ export default function Query() {
     }
 
     if (data.event === "query_complete") {
+      // FIX: streamingTextRef.current use karo — yeh poora accumulated
+      // answer hai jo token by token aaya. data.answer Redis publish ke
+      // waqt kabhi kabhi trailing content miss kar sakta hai.
+      // Agar kisi reason se streaming nahi hua (WS drop etc) toh
+      // data.answer fallback hai.
+      const fullAnswer = streamingTextRef.current || data.answer || "No answer received.";
+
       setLoading(false);
       setCurrentJobId(null);
       setAgentSteps([]);
-      setStreamingText("");  // clear streaming buffer
+      setStreamingText("");  // clear AFTER reading ref
+
       setMessages((m) => [...m, {
         role:       "ai",
-        text:       data.answer ?? "No answer received.",
-        sources:    data.sources ?? [],
-        trace:      data.trace ?? [],
+        text:       fullAnswer,
+        sources:    data.sources    ?? [],
+        trace:      data.trace      ?? [],
         confidence: data.confidence ?? null,
       }]);
       return;
@@ -199,28 +197,25 @@ export default function Query() {
     }
   };
 
-  // WebSocket — one stable connection for the whole session.
-  // onConnect  → mark WS live, poller stays disabled.
-  // onDisconnect → mark WS down, poller activates automatically.
   useWebSocket(userId, handleWsMessage, {
     onConnect:    () => setWsConnected(true),
-    onDisconnect: () => setWsConnected(false), // ← was missing; poller never activated before
+    onDisconnect: () => setWsConnected(false),
   });
 
-  // Fallback poller — only runs when wsConnected is false.
-  // When WS drops mid-query, this kicks in within 3s and delivers the answer.
+  // Fallback poller — only runs when wsConnected is false
   useJobPoller(
     currentJobId,
     ({ success, data, reason }) => {
       setLoading(false);
       setCurrentJobId(null);
       setAgentSteps([]);
+      setStreamingText("");
       if (success) {
         setMessages((m) => [...m, {
           role:       "ai",
           text:       data.answer ?? "No answer received.",
           sources:    data.sources ?? [],
-          trace:      data.trace ?? [],
+          trace:      data.trace   ?? [],
           confidence: data.confidence ?? null,
         }]);
       } else {
@@ -267,7 +262,6 @@ export default function Query() {
       const res   = await API.post("/query", { project_id: projectId, question });
       const jobId = res.data.job_id;
       setCurrentJobId(jobId);
-      // From here: WS delivers the answer, or poller does if WS is down.
     } catch (e) {
       setLoading(false);
       setMessages((m) => [...m, {
@@ -282,6 +276,7 @@ export default function Query() {
     <div className="min-h-screen bg-black">
       <div className="max-w-5xl mx-auto p-6">
 
+        {/* Header */}
         <div className="flex items-center justify-between mb-6 bg-gray-900 border border-gray-800 rounded-xl p-4">
           <div className="flex items-center gap-3">
             <Sparkles className="text-blue-500" size={24} />
@@ -301,6 +296,7 @@ export default function Query() {
           </div>
         </div>
 
+        {/* Message box */}
         <div
           ref={boxRef}
           className="h-[65vh] overflow-y-auto bg-gray-900 border border-gray-800 rounded-xl p-6 mb-4 space-y-4"
@@ -344,7 +340,7 @@ export default function Query() {
             </div>
           ))}
 
-          {/* Live streaming answer — shows tokens as they arrive before query_complete */}
+          {/* Live streaming — tokens as they arrive */}
           {streamingText && (
             <div className="flex justify-start">
               <div className="bg-gray-800 border border-gray-700 px-4 py-3 rounded-xl max-w-3xl">
@@ -367,11 +363,13 @@ export default function Query() {
                     {agentSteps.map((s, i) => (
                       <div key={i} className="flex items-center gap-2 text-xs text-gray-500">
                         <span className="text-blue-400">
-                          {s.tool_used === "search_code"    && "🔍"}
-                          {s.tool_used === "read_file"       && "📄"}
-                          {s.tool_used === "find_references" && "🔗"}
-                          {s.tool_used === "get_file_tree"   && "🌳"}
-                          {s.tool_used === "keyword_search"  && "🔎"}
+                          {s.tool_used === "search_code"        && "🔍"}
+                          {s.tool_used === "read_file"           && "📄"}
+                          {s.tool_used === "find_references"     && "🔗"}
+                          {s.tool_used === "get_file_tree"       && "🌳"}
+                          {s.tool_used === "keyword_search"      && "🔎"}
+                          {s.tool_used === "get_function_signature" && "🔬"}
+                          {s.tool_used === "summarise_file"      && "📝"}
                         </span>
                         <span>{s.step}</span>
                         <span className="ml-auto text-gray-600">{s.time}</span>
