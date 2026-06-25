@@ -6,7 +6,9 @@ import { startRedisSubscriber } from "./redis_subscriber.js";
 dotenv.config();
 
 const PORT         = process.env.WS_PORT      || 5004;
-const AUTH_SERVICE = process.env.AUTH_SERVICE_URL || "http://auth-service:5001";
+// FIX: default was "http://auth-service:5001" — wrong Docker service name.
+// Docker Compose service is named "auth", so DNS resolves to "auth", not "auth-service".
+const AUTH_SERVICE = process.env.AUTH_SERVICE_URL || "http://auth:5001";
 
 // Map of user_id → WebSocket connection
 const clients = new Map();

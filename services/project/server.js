@@ -16,6 +16,10 @@ app.use(cors({
 app.use(express.json());
 
 app.get("/", (req, res) => res.send("project service running"));
+
+// Health endpoint — checked by Docker
+app.get("/health", (req, res) => res.json({ status: "ok" }));
+
 app.use("/api/project", project_routes);
 
 const connectdb = async () => {
@@ -28,6 +32,7 @@ const connectdb = async () => {
   }
 };
 
-const PORT = process.env.PORT || 3002;
+// FIX: was defaulting to 3002. Architecture specifies port 5002.
+const PORT = process.env.PORT || 5002;
 app.listen(PORT, () => console.log(`project service running on port ${PORT}`));
 connectdb();

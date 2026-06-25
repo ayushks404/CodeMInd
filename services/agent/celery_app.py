@@ -46,6 +46,8 @@ celery_app.conf.update(
     # Keep results for 1 hour
     result_expires=3600,
 
-    # One task at a time per worker — prevents overload
-    worker_prefetch_multiplier=4,
+    # FIX: was 4 — with --concurrency=1 per worker container this caused each worker
+    # to pre-fetch 4 jobs and hold them, starving the other 2 worker containers entirely.
+    # Set to 1 so each worker only pulls what it can actually run right now.
+    worker_prefetch_multiplier=1,
 )

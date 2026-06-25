@@ -17,5 +17,3 @@ def generate_embeddings(texts) -> np.ndarray:
     model = _get_model()
     vectors = list(model.embed(texts))
     return np.array(vectors, dtype="float32")
-
-_model = TextEmbedding(MODEL_NAME)

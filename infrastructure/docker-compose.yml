@@ -1,26 +1,12 @@
 # =============================================================================
 # CodeMind — Docker Compose (Phase 2)
-#
-# HOW TO RUN:
-#   1. Copy ../.env.example to ../.env and fill in GROQ_API_KEY and JWT_SECRET
-#   2. From this directory: docker compose up --build
-#
-# Services:
-#   frontend        :5173  — React/Vite UI
-#   auth            :5000  — Node.js monolith
-#   websocket       :5004  — WebSocket real-time bridge
-#   agent           :8000  — FastAPI (health + cleanup only in Phase 2)
-#   query_worker_1/2/3    — Celery workers (query_jobs queue)
-#   index_worker_1/2      — Celery workers (index_jobs queue)
-#   qdrant          :6333  — Vector DB
-#   mongo           :27017 — MongoDB
-#   redis           :6379  — Celery broker + pub/sub
-# =============================================================================
 
 services:
 
   # ---------------------------------------------------------------------------
-  # Frontend — React/Vite
+  # Frontend — React/Vite :5173
+  # Vite proxy routes /api/auth → :5001, /api/project → :5002, /api/query → :5003
+  # so the browser only ever talks to one origin and CORS is never an issue.
   # ---------------------------------------------------------------------------
   frontend:
     build:
@@ -29,24 +15,29 @@ services:
     ports:
       - "5173:5173"
     environment:
-      - VITE_API_URL=http://localhost:5000/api
+      # Proxy targets — read by vite.config.js at dev-server startup
+      - VITE_AUTH_URL=http://auth:5001
+      - VITE_PROJECT_URL=http://project:5002
+      - VITE_QUERY_URL=http://query:5003
       - VITE_WS_URL=ws://localhost:5004
     depends_on:
       - auth
+      - project
+      - query
     networks:
       - codemind
 
   # ---------------------------------------------------------------------------
-  # Auth Service — Node.js monolith :5000
+  # Auth Service — Node.js :5001
   # ---------------------------------------------------------------------------
   auth:
     build:
       context: ../services/auth
       dockerfile: Dockerfile
     ports:
-      - "5000:5000"
+      - "5001:5001"
     environment:
-      - PORT=5000
+      - PORT=5001
       - MONGO_URI=mongodb://mongo:27017/codemind
       - JWT_SECRET=${JWT_SECRET}
       - FRONTEND_URL=http://localhost:5173
@@ -59,8 +50,59 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
+  # Project Service — Node.js :5002
+  # ---------------------------------------------------------------------------
+  project:
+    build:
+      context: ../services/project
+      dockerfile: Dockerfile
+    ports:
+      - "5002:5002"
+    environment:
+      - PORT=5002
+      - MONGO_URI=mongodb://mongo:27017/codemind
+      - REDIS_URL=redis://redis:6379/0
+      - AUTH_SERVICE_URL=http://auth:5001
+      - AI_SERVICE_URL=http://agent:8000
+      # FIX: INTERNAL_SECRET was present but must also be kept here —
+      # project service guards PATCH /:id/indexed with it
+      - INTERNAL_SECRET=${INTERNAL_SECRET}
+      - FRONTEND_URL=http://localhost:5173
+    depends_on:
+      - mongo
+      - redis
+      - auth
+    networks:
+      - codemind
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Query Service — Node.js :5003
+  # FIX: was missing INTERNAL_SECRET — not needed by query service itself,
+  # but added AUTH_SERVICE_URL which was already there. No change needed.
+  # ---------------------------------------------------------------------------
+  query:
+    build:
+      context: ../services/query
+      dockerfile: Dockerfile
+    ports:
+      - "5003:5003"
+    environment:
+      - PORT=5003
+      - MONGO_URI=mongodb://mongo:27017/codemind
+      - REDIS_URL=redis://redis:6379/0
+      - AUTH_SERVICE_URL=http://auth:5001
+      - FRONTEND_URL=http://localhost:5173
+    depends_on:
+      - mongo
+      - redis
+      - auth
+    networks:
+      - codemind
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
   # WebSocket Service — Node.js :5004
-  # Subscribes to Redis pub/sub, pushes events to browser
   # ---------------------------------------------------------------------------
   websocket:
     build:
@@ -71,10 +113,9 @@ services:
     environment:
       - WS_PORT=5004
       - REDIS_URL=redis://redis:6379/0
-      # Points to the auth service container on the internal Docker network.
-      # Service name = "auth", port = 5000 (matches auth service PORT env).
-      # This is what server.js uses to call POST /api/auth/verify.
-      - AUTH_SERVICE_URL=http://auth:5000
+      # FIX: the default in websocket/src/server.js was "http://auth-service:5001"
+      # (wrong hostname). Explicitly set here to make the correct name visible.
+      - AUTH_SERVICE_URL=http://auth:5001
     depends_on:
       - redis
       - auth
@@ -84,6 +125,9 @@ services:
 
   # ---------------------------------------------------------------------------
   # AI Agent Service — FastAPI :8000
+  # FIX: Added PROJECT_SERVICE_URL and INTERNAL_SECRET — the FastAPI app itself
+  # doesn't need them, but the index_worker Celery tasks run from the same image
+  # and DO need these to call PATCH /api/project/:id/indexed after indexing.
   # ---------------------------------------------------------------------------
   agent:
     build:
@@ -95,6 +139,8 @@ services:
       - GROQ_API_KEY=${GROQ_API_KEY}
       - QDRANT_URL=http://qdrant:6333
       - REDIS_URL=redis://redis:6379/0
+      - PROJECT_SERVICE_URL=http://project:5002
+      - INTERNAL_SECRET=${INTERNAL_SECRET}
     depends_on:
       - qdrant
       - redis
@@ -110,7 +156,7 @@ services:
       retries: 3
 
   # ---------------------------------------------------------------------------
-  # Query Workers — Celery (HIGH priority)
+  # Query Workers — Celery
   # ---------------------------------------------------------------------------
   query_worker_1:
     build:
@@ -167,7 +213,9 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
-  # Index Workers — Celery (LOW priority)
+  # Index Workers — Celery
+  # FIX: PROJECT_SERVICE_URL and INTERNAL_SECRET were already here — good.
+  # These are required so the worker can call PATCH /api/project/:id/indexed.
   # ---------------------------------------------------------------------------
   index_worker_1:
     build:
@@ -178,9 +226,12 @@ services:
       - GROQ_API_KEY=${GROQ_API_KEY}
       - QDRANT_URL=http://qdrant:6333
       - REDIS_URL=redis://redis:6379/0
+      - PROJECT_SERVICE_URL=http://project:5002
+      - INTERNAL_SECRET=${INTERNAL_SECRET}
     depends_on:
       - qdrant
       - redis
+      - project
     volumes:
       - agent_tmp:/app/tmp
     networks:
@@ -196,9 +247,12 @@ services:
       - GROQ_API_KEY=${GROQ_API_KEY}
       - QDRANT_URL=http://qdrant:6333
       - REDIS_URL=redis://redis:6379/0
+      - PROJECT_SERVICE_URL=http://project:5002
+      - INTERNAL_SECRET=${INTERNAL_SECRET}
     depends_on:
       - qdrant
       - redis
+      - project
     volumes:
       - agent_tmp:/app/tmp
     networks:

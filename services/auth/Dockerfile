@@ -1,4 +1,4 @@
-FROM node:20
+FROM node:20-slim
 
 WORKDIR /app
 
@@ -7,7 +7,7 @@ RUN npm install
 
 COPY . .
 
-EXPOSE 5000
+# FIX: was EXPOSE 5002 — auth service runs on 5001
+EXPOSE 5001
 
-CMD ["sh", "-c", "node server.js"]
- 
+CMD ["node", "server.js"]

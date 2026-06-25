@@ -5,12 +5,16 @@ Flow:
 1. Node.js project_controllers.js puts job in Redis queue
 2. This worker picks it up
 3. Runs the existing index_repo pipeline from rag_engine.py
-4. Publishes result to Redis pub/sub
-5. WebSocket service picks it up and pushes to frontend
+4. Calls PATCH /api/project/:id/indexed on the project service
+   so MongoDB sets indexed=true (fixes the "Indexing..." forever bug)
+5. Publishes result to Redis pub/sub
+6. WebSocket service picks it up and pushes to frontend
 """
 
 import logging
+import os
 import re
+import requests
 from celery_app import celery_app
 from rag.rag_engine import index_repo
 from notifications.redis_publisher import publish_indexing_complete, publish_job_failed
@@ -50,7 +54,6 @@ def run_index(self, job_id: str, project_id: str, user_id: str, repo_url: str):
     """
     logging.info(f"[index_worker] Starting job {job_id} for project {project_id}")
 
-    # Validate inputs before doing any work
     if not validate_project_id(project_id):
         publish_job_failed(
             user_id=user_id,
@@ -70,14 +73,36 @@ def run_index(self, job_id: str, project_id: str, user_id: str, repo_url: str):
         return {"status": "failed", "job_id": job_id}
 
     try:
-        # index_repo already exists in rag/rag_engine.py
-        # It clones, chunks, embeds, and saves to Qdrant
         result = index_repo(project_id, repo_url)
 
-        file_count  = result.get("file_count", 0)
-        chunk_count = result.get("chunk_count", 0)
+        # FIX: rag_engine.index_repo returns "files" and "chunks" but the worker
+        # was reading "file_count" and "chunk_count" — they never matched, so
+        # fileCount and chunkCount were always 0 in the callback.
+        file_count  = result.get("files",  0)
+        chunk_count = result.get("chunks", 0)
 
-        # Notify frontend — indexing done
+        # FIX: call PATCH /api/project/:id/indexed so MongoDB sets indexed=true.
+        # Without this, the dashboard showed "Indexing..." forever because nothing
+        # in the system was ever flipping that flag after indexing completed.
+        project_service_url = os.environ.get("PROJECT_SERVICE_URL", "http://project:5002")
+        internal_secret     = os.environ.get("INTERNAL_SECRET", "")
+        try:
+            resp = requests.patch(
+                f"{project_service_url}/api/project/{project_id}/indexed",
+                json={"fileCount": file_count, "chunkCount": chunk_count},
+                headers={"x-internal-secret": internal_secret},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            logging.info(f"[index_worker] Marked project {project_id} as indexed in DB")
+        except Exception as cb_err:
+            # Non-fatal — indexing succeeded; only the DB flag update failed.
+            # Log prominently so it's easy to spot in the worker logs.
+            logging.error(
+                f"[index_worker] WARN: failed to mark project {project_id} indexed: {cb_err}"
+            )
+
+        # Notify frontend via Redis pub/sub — WebSocket service forwards to browser
         publish_indexing_complete(
             user_id=user_id,
             project_id=project_id,

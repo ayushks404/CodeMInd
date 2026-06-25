@@ -16,6 +16,10 @@ app.use(cors({
 app.use(express.json());
 
 app.get("/", (req, res) => res.send("query service running"));
+
+// FIX: /health was missing — Docker and dependent services need this.
+app.get("/health", (req, res) => res.json({ status: "ok" }));
+
 app.use("/api/query", query_routes);
 
 const connectdb = async () => {
@@ -28,6 +32,6 @@ const connectdb = async () => {
   }
 };
 
-const PORT = process.env.PORT || 3003;
+const PORT = process.env.PORT || 5003;
 app.listen(PORT, () => console.log(`query service running on port ${PORT}`));
 connectdb();

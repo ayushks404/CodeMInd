@@ -1,9 +1,14 @@
+// FIX: "import crypto from 'crypto'" fails in some ES module contexts.
+// Named import is the correct pattern for Node.js built-ins with "type": "module".
+import { createHash } from "crypto";
 import Query from "../models/query.js";
 import JobStatus from "../models/job_status.js";
 import { pushQueryJob } from "../jobs/query_job_producer.js";
+import Redis from "ioredis";
+
+const redis = new Redis(process.env.REDIS_URL || "redis://redis:6379/0");
 
 // POST /api/query
-// Phase 2: job_id return karo turant, LLM background mein chalega
 export const ask_ques = async (req, res) => {
   try {
     const { project_id, question } = req.body;
@@ -16,23 +21,43 @@ export const ask_ques = async (req, res) => {
 
     const userId = req.user._id.toString();
 
-    // Celery queue mein push karo — turant job_id milega
+    // SHA256 hash of project_id:question — identical questions skip the queue entirely.
+    const cacheKey = createHash("sha256")
+      .update(`${project_id}:${question}`)
+      .digest("hex");
+
+    const cached = await redis.get(`cache:query:${cacheKey}`);
+    if (cached) {
+      const parsed = JSON.parse(cached);
+      return res.json({
+        job_id:     null,
+        cached:     true,
+        answer:     parsed.answer,
+        sources:    parsed.sources,
+        confidence: parsed.confidence,
+      });
+    }
+
+    // Not cached — push to Celery queue
     const jobId = await pushQueryJob({
       projectId: project_id,
       userId,
       question,
     });
 
-    // Job record save karo tracking ke liye
+    // Store cache_key on the job so query_worker can write the result back to cache.
     await JobStatus.create({
       jobId,
       type:      "query",
       status:    "queued",
       userId:    req.user._id,
       projectId: project_id,
+      cacheKey,
     });
 
-    // Turant return — HTTP timeout nahi hoga
+    // jobId → cacheKey mapping so the worker can look it up on completion.
+    await redis.set(`job:cache_key:${jobId}`, cacheKey, "EX", 86400);
+
     return res.json({ job_id: jobId });
 
   } catch (err) {
@@ -41,8 +66,7 @@ export const ask_ques = async (req, res) => {
   }
 };
 
-// GET /api/query/:jobId
-// Polling fallback — useJobPoller yahan call karta hai har 3 seconds
+// GET /api/query/:jobId — polling fallback
 export const getJobStatus = async (req, res) => {
   try {
     const { jobId } = req.params;

@@ -1,5 +1,4 @@
-import jwt from "jsonwebtoken";
-import User from "../models/user.js";
+import axios from "axios";
 
 export const protect = async (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -11,20 +10,25 @@ export const protect = async (req, res, next) => {
   const token = authHeader.split(" ")[1];
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    // Architecture Section 9.1: services must not share JWT_SECRET.
+    // Delegate verification to the auth service instead of calling jwt.verify() directly.
+    const AUTH_SERVICE = process.env.AUTH_SERVICE_URL || "http://auth:5001";
+    const { data } = await axios.post(
+      `${AUTH_SERVICE}/api/auth/verify`,
+      { token },
+      { timeout: 5000 }
+    );
 
-    // Phase 2: check Redis blocklist here
-    // const blocked = await redis.get(`blocklist:${token}`);
-    // if (blocked) return res.status(401).json({ message: "Token revoked" });
-
-    req.user = await User.findById(decoded.id).select("-password");
-
-    if (!req.user) {
-      return res.status(401).json({ message: "User not found" });
+    if (!data.valid) {
+      return res.status(401).json({ message: "Token invalid or expired" });
     }
+
+    // Middleware sets req.user with _id so controllers work unchanged.
+    req.user = { _id: data.user_id };
 
     next();
   } catch (err) {
+    console.error("Auth verify call failed:", err.message);
     return res.status(401).json({ message: "Token invalid or expired" });
   }
 };

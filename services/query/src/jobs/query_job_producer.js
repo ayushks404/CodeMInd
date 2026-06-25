@@ -36,6 +36,8 @@ export async function pushQueryJob({ projectId, userId, question }) {
     },
   };
 
-  await redis.lpush("query_jobs", JSON.stringify(task));
+  // FIX: was lpush (LIFO — jobs ran in reverse order).
+  // Celery expects rpush so jobs are consumed FIFO.
+  await redis.rpush("query_jobs", JSON.stringify(task));
   return jobId;
 }

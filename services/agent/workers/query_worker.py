@@ -1,16 +1,12 @@
 """
 query_worker.py — Celery worker for answering codebase questions
-LangGraph ReAct graph — agent khud decide karta hai
 
 Flow:
 1. Node.js pushQueryJob() → Redis "query_jobs" queue mein likhta hai
 2. Yeh worker queue se task uthata hai
-3. LangGraph graph run karo — agent tools use karta hai
+3. LangGraph ReAct graph run karo — agent tools use karta hai
 4. Redis pub/sub mein result publish karta hai
 5. WebSocket service browser ko push karta hai
-"""
-"""
-query_worker.py — Celery worker for answering codebase questions
 """
 
 import logging
@@ -19,7 +15,6 @@ from graph.react_graph import get_react_graph
 from notifications.redis_publisher import publish_query_complete, publish_job_failed
 
 logger = logging.getLogger(__name__)
-
 
 
 @celery_app.task(

@@ -37,8 +37,8 @@ export const createproject = async (req, res) => {
     const userId    = req.user._id.toString();
     const projectId = project._id.toString();
 
-    // Phase 2: Celery index_jobs queue mein push karo
-    // user_id zaroori hai taaki WebSocket notification sahi user ko jaaye
+    // FIX: was axios.post(AI_SERVICE/index-repo) — now pushes directly to Redis queue
+    // via pushIndexJob so the controller no longer depends on AI_SERVICE_URL for indexing.
     pushIndexJob({
       projectId,
       userId,
@@ -47,7 +47,6 @@ export const createproject = async (req, res) => {
       console.error("Index job push failed:", err.message);
     });
 
-    // Architecture ke according response shape
     return res.status(201).json({
       project_id: projectId,
       status:     "indexing",
@@ -113,6 +112,40 @@ export const deleteProject = async (req, res) => {
     await Project.deleteOne({ _id: project._id });
     return res.json({ message: "Project deleted successfully" });
   } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+/**
+ * PATCH /api/project/:id/indexed
+ * Internal endpoint — called only by index_worker.py after indexing completes.
+ * Sets indexed: true in MongoDB so the dashboard stops showing "Indexing...".
+ * Guarded by internalOnly middleware (x-internal-secret header check).
+ *
+ * FIX: Nothing in the system was setting indexed=true before this controller existed,
+ * which is why the dashboard showed "Indexing..." forever even after indexing finished.
+ */
+export const markProjectIndexed = async (req, res) => {
+  try {
+    const { fileCount, chunkCount } = req.body;
+
+    const project = await Project.findByIdAndUpdate(
+      req.params.id,
+      {
+        indexed:    true,
+        fileCount:  fileCount  ?? 0,
+        chunkCount: chunkCount ?? 0,
+      },
+      { new: true }
+    );
+
+    if (!project) {
+      return res.status(404).json({ message: "Project not found" });
+    }
+
+    return res.json({ ok: true, indexed: project.indexed });
+  } catch (err) {
+    console.error("markProjectIndexed error:", err);
     return res.status(500).json({ message: err.message });
   }
 };
